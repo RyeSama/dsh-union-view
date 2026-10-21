@@ -125,6 +125,40 @@ const S = {
     borderColor: 'rgba(79,156,249,.85)',
     background: 'rgba(79,156,249,.16)',
   },
+  // 「合并为新会话」主按钮：它是这一屏唯一会真的写东西的动作，给个明显的样子。
+  btnWeld: {
+    padding: '3px 10px',
+    borderRadius: 7,
+    border: '1px solid rgba(79,156,249,.9)',
+    background: 'rgba(79,156,249,.22)',
+    color: 'inherit',
+    font: 'inherit',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  btnWeldOff: {
+    padding: '3px 10px',
+    borderRadius: 7,
+    border: '1px solid rgba(128,128,128,.3)',
+    background: 'transparent',
+    color: 'inherit',
+    font: 'inherit',
+    fontSize: 12,
+    cursor: 'not-allowed',
+    opacity: 0.45,
+  },
+  num: {
+    width: 48,
+    padding: '2px 6px',
+    borderRadius: 6,
+    border: '1px solid rgba(128,128,128,.3)',
+    background: 'transparent',
+    color: 'inherit',
+    font: 'inherit',
+    fontSize: 12,
+  },
+  tiny: { fontSize: 11.5, opacity: 0.62, whiteSpace: 'nowrap' },
   picker: {
     flex: '0 0 auto',
     maxHeight: 220,
@@ -1082,6 +1116,9 @@ function UnionView(props) {
   })
   const [showSystem, setShowSystem] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
+  // 合并时每个源取最近多少轮。给默认值而不是留空：长会话全量合并会直接顶满模型窗口。
+  const [turns, setTurns] = useState(20)
+  const [weldNote, setWeldNote] = useState('')
 
   const catalog = useCatalog(api && api.sessions)
   const union = useUnion(api, selected, reloadToken)
@@ -1126,6 +1163,30 @@ function UnionView(props) {
   }, [])
 
   const clear = useCallback(() => setSelected([]), [])
+
+  // 「合并为新会话」：不自己造会话，而是替用户把 /weld 命令写进输入框并提交。
+  // 走命令而不是直连后端，是因为 /weld 在 Node 半边、又必须拿到 workspaceRegistry
+  // 才能把新会话登记进侧栏账本；这些都在命令进程里现成的。
+  const weldNow = useCallback(() => {
+    const actions = props && props.inputActions
+    if (!actions || selected.length < 2) return
+    if (typeof actions.setDraft !== 'function' || typeof actions.submit !== 'function') {
+      setWeldNote('这个版本的宿主没有暴露 setDraft/submit，请手动输入 /weld')
+      return
+    }
+    const cmd = `/weld ${selected.join(' ')} --turns ${turns}`
+    actions.setDraft(cmd)
+    actions.submit()
+    setWeldNote(`已提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮。等侧栏出现「未命名」再点开。`)
+    // 焊接是后端命令，写完文件后侧栏不会自己重拉；这里补一次刷新，省掉手动刷页面。
+    setTimeout(() => {
+      try {
+        api?.refreshSessions?.()
+      } catch {
+        /* 刷新失败不影响焊接本身 */
+      }
+    }, 3000)
+  }, [props, selected, turns])
 
   const body = (() => {
     if (!api || !api.sessions || !api.uiConversation) {
@@ -1207,7 +1268,36 @@ function UnionView(props) {
       selected.length > 0
         ? h('button', { type: 'button', style: S.btn, onClick: clear }, '清空')
         : null,
+      h('span', { style: S.barSpacer }),
+      h('span', { style: S.tiny }, '每个取最近'),
+      h('input', {
+        type: 'number',
+        min: 1,
+        max: 500,
+        value: turns,
+        style: S.num,
+        onChange: (e) => {
+          const n = Number(e.target.value)
+          setTurns(Number.isFinite(n) ? Math.max(1, Math.min(500, Math.round(n))) : 1)
+        },
+      }),
+      h('span', { style: S.tiny }, '轮 →'),
+      h(
+        'button',
+        {
+          type: 'button',
+          disabled: selected.length < 2,
+          title:
+            selected.length < 2
+              ? '至少要选两个会话'
+              : '把这些会话的历史装进一个新会话，原会话一个字不改',
+          style: selected.length >= 2 ? S.btnWeld : S.btnWeldOff,
+          onClick: weldNow,
+        },
+        '合并为新会话',
+      ),
     ),
+    weldNote ? h('div', { style: S.tiny }, weldNote) : null,
     open
       ? h(Picker, { rows: catalog, selected, onToggle: toggle, onClear: clear })
       : null,
@@ -1245,6 +1335,15 @@ function apply(ctx) {
     get uiConversation() {
       try {
         return ctx.uiConversation
+      } catch {
+        return undefined
+      }
+    },
+    // /weld 是后端命令，写完文件后宿主不一定立刻重拉会话列表；
+    // 合并按钮提交几秒后主动刷一次，用户不用手动刷新页面。
+    refreshSessions() {
+      try {
+        return ctx.sessions?.refresh?.()
       } catch {
         return undefined
       }
