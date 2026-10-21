@@ -76,6 +76,15 @@ export function mergeEventStreams(sources) {
           kept = { ...ev, data: { ...ev.data, message: { ...ev.data.message, content: blocks } } }
         }
       }
+      // 光剥 content 不够：assistant/message 还挂着 data.stream，那是逐 token 的
+      // 流式回放记录，里面照样有 blockType:"reasoning" 的 block-start 和整段
+      // reasoning-chunks。宿主重建节点时会读它，思考过程就又从这儿冒出来了。
+      // stream 只是「打字机效果」的回放素材，transcript 的真相是 message.content，
+      // 所以整段丢掉最干净（去掉单个元素会让后面的 index 错位）。
+      if (kept.type === 'assistant/message' && kept.data && kept.data.stream) {
+        const { stream, ...rest } = kept.data
+        kept = { ...kept, data: rest }
+      }
       flat.push({ ev: kept, srcId: header.id })
     }
   }
