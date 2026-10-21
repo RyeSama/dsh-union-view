@@ -16,7 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { mergeEventStreams, tailByTurns } from '../src/merge.mjs'
 
 export const name = 'dsh-union-view'
-export const inject = ['sessions', 'commands', 'workspaceRegistry']
+export const inject = ['sessions', 'commands', 'workspaceRegistry', 'sessionPersistence']
 
 const LOG_NAME = 'session.v4.jsonl.zstd'
 const SESSIONS_ROOT = join(homedir(), '.dsh', 'sessions')
@@ -161,8 +161,11 @@ async function weld(ctx, raw) {
   const cwd = sources[0].header.cwd
   if (!cwd) return { kind: 'error', text: '源会话的 header 没有 cwd，无法判断放到哪个工作区' }
 
-  const header = {
-    type: 'session',
+  // sessionPersistence.create() 要的是「header 的载荷」，不是已经序列化成一行的那份：
+  // `type: 'session'` 由 format 层自己补（手动塞进去会被判
+  // "format v4 header has unexpected field type"），但 `version` 必须自己给
+  // （缺了会报 "Session format version must be a non-negative safe integer"）。
+  const headerPayload = {
     version: 4,
     id: newId,
     createdAt: Date.now(),
@@ -170,8 +173,44 @@ async function weld(ctx, raw) {
     isSeeded: false,
     delegationDepth: 0,
   }
-  const dir = join(projectDirFor(cwd), newId)
-  writeLog(dir, header, merged)
+
+  // 正路：让宿主自己写，不碰物理格式。
+  //  1) sessionPersistence.create() 先落一个空日志文件并拿到写句柄 —— 不能省：
+  //     持久化插件靠 `this.writers.get(session.id)` 路由 session/event，
+  //     writer 只在 create/open 时注册；没有 writer，flush 会静默什么都不做
+  //     （源码：`if (writer === null || writer === void 0) return void 0`），
+  //     于是事件全留在内存里 —— 账本有 id、磁盘没文件。
+  //  2) sessions.create() 建活会话，逐条 append —— seq 由宿主自己发，天然连续，
+  //     surfaceManager.validateNext 逐步校验，报错能点名到具体事件和序号。
+  //  3) handle.flush() 把 writer 的缓冲真正落盘。
+  let how = ''
+  let handle = null
+  try {
+    const persistence = ctx.sessionPersistence
+    if (persistence && typeof persistence.create === 'function') {
+      handle = await persistence.create(headerPayload, { inheritedEventCount: 0 })
+    }
+    const session = ctx.sessions.create(newId, { meta: { cwd } })
+    for (const ev of merged) {
+      const opts = {}
+      if (ev.surfaceOp !== undefined) opts.surfaceOp = ev.surfaceOp
+      if (Array.isArray(ev.sourceEventSeqs)) opts.sourceEventSeqs = ev.sourceEventSeqs
+      session.append(ev.type, ev.data, opts)
+    }
+    // 有的宿主把 flush 放在 service 上，有的放在 session 上，有的只在句柄上。
+    if (typeof ctx.sessions.flush === 'function') await ctx.sessions.flush(session)
+    else if (typeof session.flush === 'function') await session.flush()
+    if (handle && typeof handle.flush === 'function') await handle.flush()
+    if (handle && typeof handle.close === 'function') { await handle.close(); handle = null }
+    how = '由宿主写入（persistence.create + append + flush）'
+  } catch (err) {
+    if (handle && typeof handle.close === 'function') {
+      try { await handle.close() } catch { /* 关不掉就交给后面的清理 */ }
+    }
+    // append 走的是宿主正常写入路径，报错定位比读盘校验精确得多（点名到事件类型和序号），
+    // 所以这里不回退手写 —— 写一份必然打不开的日志只会把错误藏起来，还污染账本。
+    throw new Error(`宿主拒绝了这批事件：${err && err.message ? err.message : err}`)
+  }
 
   // 写进所有权账本，侧栏才会认它。
   let attached = '未注册'
@@ -186,7 +225,7 @@ async function weld(ctx, raw) {
   const per = sources.map((s) => `${s.header.id.slice(0, 16)}… ${s.events.length}`).join(' + ')
   return {
     kind: 'success',
-    text: `已焊成新会话 ${newId}（${attached}）\n来源：${per} → ${merged.length} 条事件`
+    text: `已焊成新会话 ${newId}（${attached}）\n写入方式：${how}\n来源：${per} → ${merged.length} 条事件`
       + (turns > 0 ? `\n（每个源只取最近 ${turns} 轮）` : '')
       + '\n源会话没有被修改。刷新侧栏或重开会话列表即可看到它。',
   }

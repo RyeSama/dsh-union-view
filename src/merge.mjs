@@ -16,6 +16,12 @@ export const DROP_TYPES = new Set([
   'session/title-llm-request',
   'deliverables/presented',
   'workspace/changes',
+  // 图片卸载 / 压缩类事件带着「指向某个 surface node」的引用（实测
+  // "image/offload: target seq 87 is not a current surface node"），
+  // 合并后那些节点已经被重排或裁掉，引用必然悬空。这些是原会话的窗口
+  // 管理动作，对新会话没有意义。
+  'image/offload', 'image/restore',
+  'compaction/begin', 'compaction/end', 'compaction/summary',
 ])
 
 // 携带 turn 编号、需要重排的事件（其余事件原样搬）。
@@ -99,11 +105,10 @@ export function mergeEventStreams(sources) {
       // 光剥 content 不够：assistant/message 还挂着 data.stream，那是逐 token 的
       // 流式回放记录，里面照样有 blockType:"reasoning" 的 block-start 和整段
       // reasoning-chunks。宿主重建节点时会读它，思考过程就又从这儿冒出来了。
-      // stream 只是「打字机效果」的回放素材，transcript 的真相是 message.content，
-      // 所以整段丢掉最干净（去掉单个元素会让后面的 index 错位）。
-      if (kept.type === 'assistant/message' && kept.data && kept.data.stream) {
-        const { stream, ...rest } = kept.data
-        kept = { ...kept, data: rest }
+      // 但不能整段删：projection 阶段会 `for (const c of stream)`，字段一没了就报
+      // "stream is not iterable"。留个空数组最干净——循环跑得起来，又没有内容。
+      if (kept.type === 'assistant/message' && kept.data && Array.isArray(kept.data.stream)) {
+        kept = { ...kept, data: { ...kept.data, stream: [] } }
       }
       flat.push({ ev: kept, srcId: header.id })
     }
