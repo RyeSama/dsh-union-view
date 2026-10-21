@@ -151,11 +151,24 @@ async function weld(ctx, raw) {
 
   const sources = picked.map((p) => {
     const s = readLog(p.dir)
-    return { header: s.header, events: tailByTurns(s.events, turns) }
+    const tailed = tailByTurns(s.events, turns)
+    return { header: s.header, events: tailed, rawCount: s.events.length }
   })
 
   const merged = mergeEventStreams(sources)
-  if (merged.length === 0) return { kind: 'error', text: '合并结果为空' }
+  if (merged.length === 0) {
+    // 空结果必须自己说清楚是「读不到」还是「被过滤光」，否则只有一句「合并结果为空」，
+    // 看不出到底哪一步出的问题。
+    const detail = sources
+      .map((s) => `${s.header.id.slice(0, 16)}… 读到 ${s.rawCount} 条，截取最近 ${turns} 轮后 ${s.events.length} 条`)
+      .join('；')
+    return {
+      kind: 'error',
+      text: `合并结果为空。${detail}。\n`
+        + '读到 0 条 = 选中的对话本身没有历史（比如刚建的空白对话）；'
+        + '截取后 0 条 = 这些对话里没有 turn/start 事件。换两个有内容的对话再试。',
+    }
+  }
 
   const newId = `session-${randomUUID()}`
   const cwd = sources[0].header.cwd

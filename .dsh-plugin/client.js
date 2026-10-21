@@ -1076,14 +1076,15 @@ function Picker(props) {
     rows.map((row) => {
       const on = selected.indexOf(row.id) >= 0
       const idx = selected.indexOf(row.id)
-      return h(
-        'div',
-        {
-          key: row.id,
-          style: cx(S.pickRow, on ? { background: 'rgba(79,156,249,.1)' } : null),
-          onClick: () => onToggle(row.id),
-          title: row.cwd || row.id,
-        },
+        h(
+          'div',
+          {
+            key: row.id,
+            // 空对话点了也没用：合并它只会得到「合并结果为空」，直接从交互上挡掉。
+            style: cx(S.pickRow, on ? { background: 'rgba(79,156,249,.1)' } : null, row.blank ? { opacity: 0.42, cursor: 'not-allowed' } : null),
+            onClick: () => { if (!row.blank) onToggle(row.id) },
+            title: row.blank ? '这个对话还没有内容，合并进来只会得到空结果' : (row.cwd || row.id),
+          },
         h(
           'span',
           {
@@ -1103,7 +1104,7 @@ function Picker(props) {
         ),
         row.running ? h('span', { style: cx(S.dot, { background: '#3fb98a' }) }) : null,
         h('span', { style: S.pickTitle }, row.title),
-        h('span', { style: S.pickMeta }, fmtAgo(row.updatedAt)),
+        h('span', { style: S.pickMeta }, row.blank ? '空对话' : fmtAgo(row.updatedAt)),
       )
     }),
   )

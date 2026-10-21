@@ -1,6 +1,6 @@
 {
   "name": "dsh-union-view",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "description": "DSH Web GUI 的联合视图：同时选中多个会话，只读地拼成一条联合时间线（分栏或交错），不动数据、不进模型上下文",
   "keywords": [

@@ -22,6 +22,10 @@ export const DROP_TYPES = new Set([
   // 管理动作，对新会话没有意义。
   'image/offload', 'image/restore',
   'compaction/begin', 'compaction/end', 'compaction/summary',
+  // 工具调用在 content 里已经剥掉了。事件层的 tool/call 还留着的话，宿主会拿
+  // callId 去找对应的内容块，找不到就判
+  // "tool/call call_00_xxx has no advertised tool lifecycle"。
+  'tool/call', 'tool/result',
 ])
 
 // 携带 turn 编号、需要重排的事件（其余事件原样搬）。
