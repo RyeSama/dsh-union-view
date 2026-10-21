@@ -1,0 +1,44 @@
+{
+  "name": "dsh-union-view",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DSH Web GUI 的联合视图：同时选中多个会话，只读地拼成一条联合时间线（分栏或交错），不动数据、不进模型上下文",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "union-view",
+    "multi-session",
+    "transcript",
+    "session-merge"
+  ],
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "check:client": "node scripts/build-client.mjs --check",
+    "install:local": "node scripts/install-local.mjs"
+  },
+  "main": "./.dsh-plugin/index.mjs",
+  "files": [
+    ".dsh-plugin",
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./.dsh-plugin/index.mjs",
+    "./client": "./.dsh-plugin/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    }
+  },
+  "license": "MIT"
+}

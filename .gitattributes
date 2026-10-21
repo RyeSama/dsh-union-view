@@ -1,0 +1,6 @@
+* text=auto eol=lf
+
+# 构建产物：字节必须与 build-client 的 --check 一致，别做换行转换
+.dsh-plugin/client.js -text
+
+*.png binary

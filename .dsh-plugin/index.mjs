@@ -1,0 +1,177 @@
+// Node 半边：注册 /weld 命令，把多个会话焊成一个新会话。
+//
+// 这条路为什么这么绕：
+//   · 会话不是「扫目录」发现的——侧栏读的是 ~/.dsh/storages/workspace.json 里
+//     workspaces[].sessionIds 这份所有权账本，手写文件不 attach 就不会出现。
+//   · ctx.sessions.create() 只让会话活在内存里，不落盘也不进账本
+//     （它等的是 session/event 上的持久化订阅，而种子历史不会重放事件）。
+// 所以这里自己干两件事：按宿主物理格式分帧写日志，再 attachSession 进账本。
+//
+// 合并规则在 ../src/merge.mjs，和离线脚本 scripts/merge-sessions.mjs 共用同一份。
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+import { randomUUID } from 'node:crypto'
+import { mergeEventStreams, tailByTurns } from '../src/merge.mjs'
+
+export const name = 'dsh-union-view'
+export const inject = ['sessions', 'commands', 'workspaceRegistry']
+
+const LOG_NAME = 'session.v4.jsonl.zstd'
+const SESSIONS_ROOT = join(homedir(), '.dsh', 'sessions')
+
+/** 扫所有工程目录下的会话目录（只认有日志文件的）。 */
+function listSessionDirs() {
+  const out = []
+  if (!existsSync(SESSIONS_ROOT)) return out
+  for (const proj of readdirSync(SESSIONS_ROOT, { withFileTypes: true })) {
+    if (!proj.isDirectory()) continue
+    const projPath = join(SESSIONS_ROOT, proj.name)
+    let entries
+    try {
+      entries = readdirSync(projPath, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const s of entries) {
+      if (!s.isDirectory()) continue
+      const dir = join(projPath, s.name)
+      if (existsSync(join(dir, LOG_NAME))) out.push({ id: s.name, dir })
+    }
+  }
+  return out
+}
+
+function readLog(dir) {
+  // 日志是多帧 zstd（header 一帧 + 每条事件一帧），zstdDecompressSync 会连续解完。
+  const text = zstdDecompressSync(readFileSync(join(dir, LOG_NAME))).toString('utf8')
+  const lines = text.split('\n').filter((l) => l.length > 0)
+  const header = JSON.parse(lines[0])
+  const events = lines.slice(1).map((l) => JSON.parse(l))
+  return { header, events }
+}
+
+// 宿主读 header 时只解压「第一个 zstd frame」，并要求这一帧里只有 header 一行
+// （assertZstdHeaderFrame）。整份压成一个 frame 会被判成 corrupt。
+function writeLog(dir, header, events) {
+  mkdirSync(dir, { recursive: true })
+  const frames = [zstdCompressSync(Buffer.from(JSON.stringify(header) + '\n', 'utf8'))]
+  for (const ev of events) {
+    frames.push(zstdCompressSync(Buffer.from(JSON.stringify(ev) + '\n', 'utf8')))
+  }
+  writeFileSync(join(dir, LOG_NAME), Buffer.concat(frames))
+}
+
+/** 会话在磁盘上的工程目录：和 dsh 的 projectKey 规则一致（D:\dsh-workspace → --D-dsh-workspace--）。 */
+function projectDirFor(cwd) {
+  const key = `--${String(cwd).replace(/:/g, '').replace(/[\\/]+/g, '-')}--`
+  return join(SESSIONS_ROOT, key)
+}
+
+function parseArgs(raw) {
+  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean)
+  let turns = 0
+  const wanted = []
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === '--turns') {
+      turns = Number(tokens[i + 1]) || 0
+      i += 1
+      continue
+    }
+    wanted.push(tokens[i])
+  }
+  return { turns, wanted }
+}
+
+async function weld(ctx, raw) {
+  const { turns, wanted } = parseArgs(raw)
+  if (wanted.length < 2) {
+    return { kind: 'error', text: '用法：/weld <会话id或前缀> <会话id或前缀> [...] [--turns N]' }
+  }
+
+  const all = listSessionDirs()
+  if (all.length === 0) return { kind: 'error', text: `没有找到任何会话日志（${SESSIONS_ROOT}）` }
+
+  const picked = []
+  for (const w of wanted) {
+    const hits = all.filter((s) => s.id === w || s.id.includes(w))
+    if (hits.length === 0) return { kind: 'error', text: `找不到会话：${w}` }
+    if (hits.length > 1) return { kind: 'error', text: `前缀 ${w} 命中 ${hits.length} 个会话，写长一点再试` }
+    if (picked.some((p) => p.id === hits[0].id)) continue
+    picked.push(hits[0])
+  }
+  if (picked.length < 2) return { kind: 'error', text: '至少要两个不同的会话' }
+
+  const sources = picked.map((p) => {
+    const s = readLog(p.dir)
+    return { header: s.header, events: tailByTurns(s.events, turns) }
+  })
+
+  const merged = mergeEventStreams(sources)
+  if (merged.length === 0) return { kind: 'error', text: '合并结果为空' }
+
+  const newId = `session-${randomUUID()}`
+  const cwd = sources[0].header.cwd
+  if (!cwd) return { kind: 'error', text: '源会话的 header 没有 cwd，无法判断放到哪个工作区' }
+
+  const header = {
+    type: 'session',
+    version: 4,
+    id: newId,
+    createdAt: Date.now(),
+    cwd,
+    isSeeded: false,
+    delegationDepth: 0,
+  }
+  const dir = join(projectDirFor(cwd), newId)
+  writeLog(dir, header, merged)
+
+  // 写进所有权账本，侧栏才会认它。
+  let attached = '未注册'
+  try {
+    const ws = (await ctx.workspaceRegistry.resolveByPath(cwd)) || (await ctx.workspaceRegistry.create(cwd))
+    await ws.attachSession(newId)
+    attached = '已注册'
+  } catch (err) {
+    attached = `注册失败：${err && err.message ? err.message : err}`
+  }
+
+  const per = sources.map((s) => `${s.header.id.slice(0, 16)}… ${s.events.length}`).join(' + ')
+  return {
+    kind: 'success',
+    text: `已焊成新会话 ${newId}（${attached}）\n来源：${per} → ${merged.length} 条事件`
+      + (turns > 0 ? `\n（每个源只取最近 ${turns} 轮）` : '')
+      + '\n源会话没有被修改。刷新侧栏或重开会话列表即可看到它。',
+  }
+}
+
+export function apply(ctx) {
+  try {
+    ctx.commands.register({
+      name: 'weld',
+      description: '把多个会话的历史焊成一个新会话（源会话只读，新会话可以接着聊）',
+      input: { hint: '<会话id或前缀> <会话id或前缀> [...] [--turns N]' },
+      handler: (inv) => weld(ctx, inv.rawInput),
+    })
+    console.log('[dsh-union-view] /weld 已注册')
+  } catch (err) {
+    console.error('[dsh-union-view] /weld 注册失败:', err && err.stack ? err.stack : err)
+  }
+
+  // 自检：UI 里敲命令不方便时用它跑一遍完整链路。
+  // 只在显式设了 UV_WELD_SELFTEST 时执行，平时完全不碰。
+  if (process.env.UV_WELD_SELFTEST) {
+    const src = process.env.UV_WELD_SRC || ''
+    const turns = Number(process.env.UV_WELD_TURNS || 0)
+    setTimeout(async () => {
+      try {
+        console.log('[selftest] 开始，源:', src, 'turns:', turns)
+        const r = await weld(ctx, `${src.replace(/,/g, ' ')}${turns ? ` --turns ${turns}` : ''}`)
+        console.log('[selftest] 结果:', r.kind, '|', String(r.text).replace(/\n/g, ' / '))
+      } catch (err) {
+        console.error('[selftest] 抛错:', err && err.stack ? err.stack : err)
+      }
+    }, 3000)
+  }
+}

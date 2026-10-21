@@ -1,0 +1,7 @@
+# dsh-union-view bundle patch：向 web 组合挂载 dsh-union-view。
+# Node half 极简（纯只读视图，无后端、无持久化、不写会话）；
+# 主体是 client half —— 经 package.json 的 dsh.client 声明由 client 内核组合进页面，
+# 注册 conversation.view 槽位的 'union' 视图（order 6，落在「对话」「GAL视窗」之后、「轨迹」之前）。
+- insert:
+    - id: dsh-union-view
+      name: dsh-union-view
