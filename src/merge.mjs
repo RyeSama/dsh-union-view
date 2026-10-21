@@ -60,7 +60,23 @@ export function mergeEventStreams(sources) {
         if (sawSystem) continue
         sawSystem = true
       }
-      flat.push({ ev, srcId: header.id })
+      let kept = ev
+      // 思考过程既不显示也不参与合并，在摊平阶段就剥掉：
+      // 事件里的内容块用的是 `kind`（实测一个工作区 5378 个 reasoning / 5982 个
+      // tool-call 全是 kind），`type` 是 LLM 原始格式的写法，两个都得判。
+      // 整条只剩思考的消息直接丢，否则会留下一条空 content 的 assistant 消息。
+      if (ev.type === 'assistant/message' && Array.isArray(ev.data?.message?.content)) {
+        const blocks = ev.data.message.content.filter((b) => {
+          if (!b) return false
+          const k = b.kind ?? b.type
+          return k !== 'reasoning' && k !== 'thinking'
+        })
+        if (blocks.length !== ev.data.message.content.length) {
+          if (blocks.length === 0) continue
+          kept = { ...ev, data: { ...ev.data, message: { ...ev.data.message, content: blocks } } }
+        }
+      }
+      flat.push({ ev: kept, srcId: header.id })
     }
   }
 
@@ -106,13 +122,6 @@ export function mergeEventStreams(sources) {
   for (let i = 0; i < rewritten.length; i += 1) {
     const { next, origin } = rewritten[i]
     next.seq = i
-    // 思考过程既不显示也不参与合并：assistant 消息只留正文与工具调用。
-    if (next.type === 'assistant/message' && Array.isArray(next.data?.message?.content)) {
-      const kept = next.data.message.content.filter((b) => b && b.type !== 'reasoning')
-      if (kept.length !== next.data.message.content.length) {
-        next.data = { ...next.data, message: { ...next.data.message, content: kept } }
-      }
-    }
     if (origin.surfaceOp && typeof origin.surfaceOp === 'object') {
       // 宿主对 seed 有一道硬校验：replace 的 sourceEventSeqs 必须列全被遮盖的
       // 每一条 surface 事件（少一条就 "invalid seed event ... must include every
