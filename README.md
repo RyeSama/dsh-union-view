@@ -1,6 +1,8 @@
 # 联合视图（dsh-union-view）
 
-> 把好几个对话并排摊在屏幕上一起看；需要的话，还能把它们的历史焊成一个新对话接着聊。
+> 把好几个对话并排摊在屏幕上一起看；需要的话，还能把它们的历史装进一个新对话接着聊。
+
+**当前版本 0.4.0** · [更新记录](CHANGELOG.md) · MIT
 
 ## 先说这东西解决什么
 
@@ -101,6 +103,19 @@
 
 新对话的标题会显示「未命名」，因为原来的标题带引用关系，截断后对不上，干脆不要了。改个名字就行。
 
+### 新对话里到底装了什么
+
+只有你和 AI 说过的话。剥掉的是这四类：
+
+| 剥掉的 | 为什么 |
+| --- | --- |
+| AI 的思考过程 | 又长又碎，而且它本来就不该算"说过的话"。内容块和 `data.stream` 里的逐 token 回放都要剥，漏一处就会从重建的节点里冒回来 |
+| 工具调用与工具结果 | `[调用 read_image]` 这类记录，几十条连着刷屏，对接着聊没有价值 |
+| 图片卸载、上下文压缩 | 这些是原对话的窗口管理动作，引用已经指向不存在的位置，带过去会让日志校验失败 |
+| 会话开头重复的初始化事件 | 每个源都有一份，装几份进去结构就乱了 |
+
+**代价**：如果某个源对话里 AI 光在调工具、没怎么说话，装进新对话的内容就会很少——原文本来如此，不是丢数据。
+
 ### 怎么知道对话的编号
 
 通常在联合视图里点按钮就够了，不用记编号。真要手打，`/weld` 不带参数回车会列出来；也可以去 `.dsh/sessions/` 目录下看，每个对话是一个以 `session-` 开头的文件夹，文件夹名就是编号。
@@ -177,30 +192,39 @@ const nodes = chat.getSnapshot().legacy.nodes   // 对话节点数组
 
 **踩过的坑**：定位一定要写在 CSS 里，不能写内联 `style`——内联的 `position: relative` 会盖掉 CSS 里的 `absolute`，面板会按内容高度一路涨到十几万像素。
 
-### `/weld` 为什么要自己写文件
+### `/weld` 怎么写入新对话
 
-DSH 有个 `ctx.sessions.create()`，但它只准备内存里的会话对象，**不落盘、不进侧栏账本**（源码注释写得很直白：persistence is a plugin concern）。所以 `/weld` 只能自己造文件：
+DSH 有个 `ctx.sessions.create()`，但它只准备内存里的会话对象，**不落盘、不进侧栏账本**（源码注释写得很直白：persistence is a plugin concern）。
 
-1. **文件格式**：header 必须独占第一个 zstd frame 且以单个 `\n` 结尾，之后每条事件各自成一个 frame。全塞进一个 frame 会被判 corrupt，而扫描目录的代码对这类文件是**静默跳过**的——不报错，就是看不到。
-2. **侧栏账本**：对话列表不是扫目录得来的，是读 `~/.dsh/storages/workspace.json` 里的 `sessionIds` 数组。不在数组里，文件再正确也不显示。
+手写日志这条路走不通：宿主对从磁盘读回的日志有很严的结构校验（turn 必须连续、引用不能悬空、assistant 消息要带 `stream`），照着报错猜了四轮结构，一次都没过。
 
-所以流程是：自己写文件 → 调 `workspaceRegistry.attachSession(newId)` → 它会校验 header 里的 `cwd` 和真实路径一致，通过后才把编号插进数组。
+现在的做法是让 dsh 自己写：
 
-**改 `workspace.json` 只能用 JSON 解析器改**。用正则删数组元素会留下孤立逗号，JSON 一坏，整个界面会变成"暂无会话"。
+1. `sessionPersistence.create({ version, id, createdAt, cwd, isSeeded: false, delegationDepth: 0 })` 建日志文件和写句柄。**这一步不能省**：持久化插件靠 `writers.get(session.id)` 路由 `session/event`，没有写句柄时 `flush` 会静默返回——账本有 id、磁盘没文件。
+2. `sessions.create()` 建活会话，把合并好的事件一条条 `append()`。seq 由宿主自己发，天然连续，每一步还有 `surfaceManager.validateNext` 校验。
+3. `handle.flush()` 落盘。
+
+好处是报错从「`turn/start does not open the expected turn`」这种无从下手的话，变成了「`image/offload`: target seq 87 is not a current surface node」——直接点名事件类型和序号。
+
+走这条路顺带踩到三个坑：图片卸载／上下文压缩这类事件带着指向 surface node 的引用，合并后必然悬空（直接丢弃）；`assistant/message.data.stream` 不能整段删（重建节点时会 `for..of`，字段没了就报 `stream is not iterable`），要留空数组；header 载荷不要带 `type`（会被判 `unexpected field type`），但必须带 `version`。
+
+**侧栏账本**：对话列表不是扫目录得来的，是读 `~/.dsh/storages/workspace.json` 里的 `sessionIds` 数组。所以最后还要调 `workspaceRegistry.attachSession(newId)`，它会校验 header 里的 `cwd` 和真实路径一致，通过后才把编号插进数组。
+
+**改 `workspace.json` 只能用 JSON 解析器改**。用正则删数组元素会留下孤立逗号，JSON 一坏，整个界面会变成「暂无会话」。
 
 </details>
 
 ## 目录结构
 
 ```
-src/client.js       界面（联合会话视图，~1300 行）
+src/client.js       界面（联合会话视图、三布局、合并按钮）
 src/merge.mjs       合并逻辑（纯函数，不碰磁盘）
-.dsh-plugin/index.mjs   Node 半边（注册 /weld 命令）
+.dsh-plugin/index.mjs   Node 半边（注册 /weld 命令、写入新对话）
 scripts/build-client.mjs   打包界面代码
 scripts/install-local.mjs  本机安装
-scripts/merge-sessions.mjs 命令行合并（调试用）
-scripts/cleanup-test.mjs   清理测试会话
-scripts/e2e-verify.mjs     自动验收（需要浏览器调试端口）
+scripts/cleanup-test.mjs   清理测试会话（从账本和磁盘一起删）
+scripts/e2e-verify.mjs     自动验收：三布局截图（需要浏览器调试端口）
+scripts/probe-weld.mjs     自动验收：打开合并出来的新对话，检查有没有加载错误
 ```
 
 ## 已知限制
@@ -211,9 +235,8 @@ scripts/e2e-verify.mjs     自动验收（需要浏览器调试端口）
 - `/weld` 生成的新对话，第一批请求的缓存要从零建立（新对话全新前缀，这个省不掉）
 - `/weld` 每个源只取最近 N 轮：两个几百条消息的对话加起来上万条，不截断会顶满窗口
 - `/weld` 生成的对话标题显示「未命名」：原标题带引用关系，截断后对不上，干脆不搬
-- 视图（多选会话、三种摆法、只显示正文）和 `/weld` 现在都可用；`/weld` 走的是宿主
-  自己的写入路径（`sessionPersistence.create` + 逐条 `append` + `flush`），日志结构
-  由 dsh 自己保证合法
+- `/weld` 是数百毫秒到几十秒的操作（几千条事件逐条交给宿主写），中间没有进度条，等侧栏冒出新对话即可
+- 同一个对话同时只能有一个写入者：如果目标对话正被另一个 DSH 实例占用，命令会报 `session/writer-held`，换一个空闲对话提交即可
 
 ## 许可
 
