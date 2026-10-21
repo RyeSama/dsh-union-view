@@ -1,5 +1,27 @@
 # 更新记录
 
+## 0.3.0
+
+**联合视图只显示你和 AI 说的话**
+
+以前一屏里混着三种噪音，现在都滤掉了：
+
+- **AI 的思考过程**：不显示，也不参与合并。以前的判断读的是内容块的 `type` 字段，实际字段叫 `kind`，所以一条都没命中——这是思考过程一直没被剥掉的真因。
+- **工具调用与工具结果**：`[调用 read_image]` 这类行不再出现，几十条连着刷屏的情况没了。
+- **系统注入**：`<AEGIS_DSH_ROUTING_BOOTSTRAP>`、`Time sampled while preparing turn 12…`、`Browser time zone for this request…`、`[Compressed conversation section]`、`Current working directory…` 这些宿主塞给 AI 的内容，以前被当成用户说的话搬上了桌，现在按整块/逐行规则过滤。
+
+**合并侧同步收紧**
+
+`/weld` 生成新对话时：剥掉思考过程（包括 `data.stream` 里那份逐 token 回放记录）、剥掉工具内容块与 `tool/call`、`tool/result` 事件、剥掉会话开头的重复初始化事件、引用去重。
+
+**已知问题：合并出来的新对话可能打不开**
+
+dsh 从磁盘读回日志时会校验结构（turn 必须连续、`turn/start` 必须跟在上一轮收尾之后、`sourceEventSeqs` 不能重复也不能指向后面的行），跨会话拼接很难同时满足，报 `SessionFormatError: turn/start does not open the expected turn`。
+
+已试过四种修法都不行：按顺序重编号 turn、末尾轮补齐 `turn/end`、保留首组初始化事件、引用去重。要做稳得改成走宿主自己的 `ctx.sessions.create()`，让内核自己写日志，而不是手写文件。
+
+按钮已标注「（实验）」，README 的「已知限制」里写清了。
+
 ## 0.2.0
 
 **新增：在联合视图里直接生成新对话**
@@ -15,7 +37,3 @@
 ## 0.1.0
 
 首个版本。
-
-- 联合视图：同时选中多个对话，只读地拼成一条时间线，支持时间线 / 分栏 / 轮次对齐三种摆法
-- `/weld` 命令：把多个对话的历史焊成一个真实的新对话，可以继续对话
-- 全程只读：不写日志、不进模型上下文、不改动任何原有对话
