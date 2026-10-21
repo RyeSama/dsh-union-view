@@ -1222,9 +1222,8 @@ function UnionView(props) {
       setTimeout(() => {
         pressEnter()
         setWeldNote(
-        `已提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮。等侧栏出现「未命名」再点开。` +
-          `（实验功能：宿主对拼接出来的日志校验很挑，新会话有一定概率打不开）`,
-      )
+          `已提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮。几秒后侧栏会多出「未命名」，点开就能接着聊。`,
+        )
       }, 700)
     }, 120)
     // 焊接是后端命令，写完文件后侧栏不会自己重拉；这里补一次刷新，省掉手动刷页面。
@@ -1339,11 +1338,11 @@ function UnionView(props) {
           title:
             selected.length < 2
               ? '至少要选两个会话'
-              : '把这些会话的历史装进一个新会话，原会话一个字不改（实验：宿主对拼接出来的日志校验很挑，可能打不开）',
+              : '把这些会话的历史装进一个新会话，原会话一个字不改',
           style: selected.length >= 2 ? S.btnWeld : S.btnWeldOff,
           onClick: weldNow,
         },
-        '合并为新会话（实验）',
+        '合并为新会话',
       ),
     ),
     weldNote ? h('div', { style: S.tiny }, weldNote) : null,

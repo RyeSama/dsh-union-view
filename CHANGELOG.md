@@ -1,39 +1,59 @@
 # 更新记录
 
+## 0.3.1
+
+**`/weld` 合并会话终于能用了。**
+
+之前它老是失败：新会话确实出现在侧栏，点开却是「加载失败」。原因是我们在自己拼日志文件，
+而宿主对日志的校验非常挑——turn 编号要连续、引用不能指向不存在的事件、assistant 消息要带
+`stream` 字段……照着报错猜了四轮结构，一次都没猜对。
+
+现在改成让宿主自己写：
+
+- 先 `sessionPersistence.create()` 建日志文件和写句柄（这一步不能省，没有写句柄时
+  `flush` 会静默什么都不做，事件全留在内存里——账本有 id、磁盘没文件）
+- 再 `sessions.create()` + 一条条 `append()`，seq 由宿主自己发，天然连续
+- 最后 `handle.flush()` 真正落盘
+
+顺带修掉三处只有走这条路才会暴露的问题：
+
+- 图片卸载、上下文压缩这类事件的引用会悬空，直接丢掉（`image/offload`、
+  `compaction/*`）
+- `assistant/message.data.stream` 不能整段删，重建节点时会报 `stream is not iterable`，
+  改成留空数组
+- header 载荷不要带 `type`（会被判 `unexpected field type`），但必须带 `version`
+
+实测：两个会话各取最近 20 轮 → 8207 条事件 → 1.2 MB 日志，新会话正常打开、能接着聊。
+
 ## 0.3.0
 
 **联合视图只显示你和 AI 说的话**
 
 以前一屏里混着三种噪音，现在都滤掉了：
 
-- **AI 的思考过程**：不显示，也不参与合并。以前的判断读的是内容块的 `type` 字段，实际字段叫 `kind`，所以一条都没命中——这是思考过程一直没被剥掉的真因。
+- **AI 的思考过程**：不显示，也不参与合并。之前的判断读的是内容块的 `type` 字段，
+  实际字段叫 `kind`，所以一条都没命中——这是思考过程一直没被剥掉的真因。
 - **工具调用与工具结果**：`[调用 read_image]` 这类行不再出现，几十条连着刷屏的情况没了。
-- **系统注入**：`<AEGIS_DSH_ROUTING_BOOTSTRAP>`、`Time sampled while preparing turn 12…`、`Browser time zone for this request…`、`[Compressed conversation section]`、`Current working directory…` 这些宿主塞给 AI 的内容，以前被当成用户说的话搬上了桌，现在按整块/逐行规则过滤。
+- **系统注入**：`<AEGIS_DSH_ROUTING_BOOTSTRAP>`、`Time sampled while preparing turn 12…`、
+  `Browser time zone for this request…`、`[Compressed conversation section]`、
+  `Current working directory…` 这些宿主塞给 AI 的内容，以前被当成用户说的话掺上了屏，
+  现在按整块／逐行规则过滤。
 
-**合并侧同步收紧**
-
-`/weld` 生成新对话时：剥掉思考过程（包括 `data.stream` 里那份逐 token 回放记录）、剥掉工具内容块与 `tool/call`、`tool/result` 事件、剥掉会话开头的重复初始化事件、引用去重。
-
-**已知问题：合并出来的新对话可能打不开**
-
-dsh 从磁盘读回日志时会校验结构（turn 必须连续、`turn/start` 必须跟在上一轮收尾之后、`sourceEventSeqs` 不能重复也不能指向后面的行），跨会话拼接很难同时满足，报 `SessionFormatError: turn/start does not open the expected turn`。
-
-已试过四种修法都不行：按顺序重编号 turn、末尾轮补齐 `turn/end`、保留首组初始化事件、引用去重。要做稳得改成走宿主自己的 `ctx.sessions.create()`，让内核自己写日志，而不是手写文件。
-
-按钮已标注「（实验）」，README 的「已知限制」里写清了。
+**代价**：源对话里 AI 光调工具不说话的段落，剥完就只剩几行字——看着内容少，是原文本身如此。
 
 ## 0.2.0
 
-**新增：在联合视图里直接生成新对话**
+**合并时不再带思考过程**
 
-勾几个对话 → 填「每个取最近 N 轮」→ 点「合并为新会话」。不用再手打 `/weld` 和对话编号。生成的新对话在侧栏最上面（显示「未命名」），点开能接着聊；原对话不受影响。提交后会自动刷一次会话列表，不用手动刷新页面。
-
-配套改动：
-
-- `/weld` 不带参数时列出最近 12 个对话（编号、时间、第一句话），照着抄就行
-- 合并时会剥掉 AI 的思考过程，只留用户和 AI 的最终输出，省下大量窗口
-- README 重写为面向普通用户的说明，技术细节收进折叠区
+`/weld` 生成新对话时剥掉 reasoning（包括 `data.stream` 里那份逐 token 回放）、
+剥掉工具内容块与 `tool/call`、`tool/result` 事件、剥掉会话开头重复的初始化事件、
+引用去重。实测 588 条事件焊出来 331 KB，带思考时是 5 MB。
 
 ## 0.1.0
 
 首个版本。
+
+- 在对话标签栏里加一个「联合视图」：勾选多个会话，把它们的转录拼成一屏，三种摆法
+  （按时间排／左右分栏／一问一答对齐）
+- 只读：不写日志、不进模型上下文、不改动任何会话
+- `/weld` 把多个会话焊成一个新会话（实验）
