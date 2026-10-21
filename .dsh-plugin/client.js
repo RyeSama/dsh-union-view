@@ -348,10 +348,11 @@ function blockText(b) {
   if (typeof b === 'string') return b
   if (Array.isArray(b)) return b.map(blockText).join('')
   const k = str(b.type) || str(b.kind)
-  // 思考过程不进视图：reasoning 块自己带 text 字段，
-  // 必须先按 kind 拦掉，否则下面那句 str(b.text) 会把它当成正文吐出来。
-  if (k === 'reasoning') return ''
-  if (k === 'tool-call') return '[调用 ' + (str(b.name) || '工具') + ']'
+  // 联合视图只显示人来人往的正文：思考过程、工具调用、工具结果都不占行。
+  // reasoning 自己带 text 字段，必须先按 kind 拦掉，否则下面那句
+  // str(b.text) 会把它当成正文吐出来。
+  if (k === 'reasoning' || k === 'thinking') return ''
+  if (k === 'tool-call') return ''
   if (k === 'tool-result') return ''
   if (k === 'image') return '[图片]'
   const t = str(b.text)
@@ -368,18 +369,34 @@ function textOfContent(blocks) {
   return arr.map(blockText).join('').trim()
 }
 
+/**
+ * 用户消息里混着宿主注入的东西：AEGIS 路由块、每步的时间戳环境行、
+ * 压缩摘要、后台任务通知、审批策略变更……这些不是人说的话，别搬上桌。
+ * 整条都是注入的就返回空串，调用方据此把这条消息整个隐掉。
+ */
+const INJECTED_BLOCK = /^(?:<\w|\[\s*(?:Compressed conversation section|ACP)\s*\]|\ud83d\udce6 \[ACP\])/
+const INJECTED_LINE =
+  /^(?:Time sampled|Browser time zone|Elapsed since|Current runtime context|Current working directory|Approval requests are auto-granted|background job\b|<acp |<\/?[A-Za-z_]+>|\[language\])/i
+
+function stripInjected(text) {
+  const s = (text || '').trim()
+  if (!s) return ''
+  if (INJECTED_BLOCK.test(s)) return ''
+  const kept = s
+    .split('\n')
+    .filter((line) => !INJECTED_LINE.test(line.trim()))
+    .join('\n')
+    .trim()
+  return kept
+}
+
 function textOfAssistant(blocks) {
   if (!blocks || !Array.isArray(blocks)) return ''
   const parts = []
   for (const b of blocks) {
     const k = str(b && b.kind) || str(b && b.type)
-    if (k === 'tool-call') {
-      const name = str(b.name)
-      let args = str(b.argsRaw)
-      if (args.length > 120) args = args.slice(0, 120) + '…'
-      parts.push('[调用 ' + (name || '工具') + (args ? ' ' + args : '') + ']')
-      continue
-    }
+    // 工具调用不占行：这里只收 AI 说出口的正文。
+    if (k === 'tool-call') continue
     const t = blockText(b)
     if (t) parts.push(t)
   }
@@ -449,13 +466,23 @@ const SYSTEM_KINDS = {
 function describeNode(node) {
   const kind = str(node && node.kind) || 'unknown'
   if (kind === 'user') {
-    return { role: 'user', tag: '你', text: textOfContent(node.content), system: false }
+    const text = stripInjected(textOfContent(node.content))
+    // 整条都是宿主注入（路由块、时间戳、压缩摘要、任务通知）→ 当系统事件处理，
+    // 默认收起，免得把工作区信息、注入提示当成用户说的话摊在桌上。
+    if (!text) return { role: 'user', tag: '你', text: '', system: true }
+    return { role: 'user', tag: '你', text, system: false }
   }
   if (kind === 'assistant') {
-    return { role: 'ai', tag: 'AI', text: textOfAssistant(node.blocks), system: false }
+    const text = textOfAssistant(node.blocks)
+    // 工具调用和思考过程都剥掉之后，很多助手消息只剩壳（这一步只是在调工具）。
+    // 空壳不占行，否则一屏全是「会话名 AI 15:42:38」这种没有内容的分隔。
+    if (!text) return null
+    return { role: 'ai', tag: 'AI', text, system: false }
   }
   if (kind === 'steering') {
-    return { role: 'user', tag: '插话', text: textOfContent(node.content), system: false }
+    const text = stripInjected(textOfContent(node.content))
+    if (!text) return { role: 'user', tag: '插话', text: '', system: true }
+    return { role: 'user', tag: '插话', text, system: false }
   }
   if (kind === 'tool-result') {
     let t = str(node.text) || str(node.output)
@@ -807,7 +834,7 @@ function Rail(props) {
 function MessageRow(props) {
   const { color, sessionTitle, node, showSystem, showSession, dense } = props
   const d = describeNode(node)
-  if (d.system && !showSystem) return null
+  if (!d || (d.system && !showSystem)) return null
   const clock = fmtClock(timeOf(node))
   const empty = d.text === ''
   return h(
@@ -1002,7 +1029,7 @@ function TurnsLayout(props) {
           }
           const shown = turn.nodes.filter((n) => {
             const d = describeNode(n)
-            return showSystem || !d.system
+            return d && (showSystem || !d.system)
           })
           return h(
             'div',
@@ -1170,14 +1197,36 @@ function UnionView(props) {
   const weldNow = useCallback(() => {
     const actions = props && props.inputActions
     if (!actions || selected.length < 2) return
-    if (typeof actions.setDraft !== 'function' || typeof actions.submit !== 'function') {
-      setWeldNote('这个版本的宿主没有暴露 setDraft/submit，请手动输入 /weld')
+    if (typeof actions.setDraft !== 'function') {
+      setWeldNote('这个版本的宿主没有暴露 setDraft，请手动输入 /weld')
       return
     }
     const cmd = `/weld ${selected.join(' ')} --turns ${turns}`
     actions.setDraft(cmd)
-    actions.submit()
-    setWeldNote(`已提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮。等侧栏出现「未命名」再点开。`)
+    setWeldNote(`正在提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮…`)
+    // setDraft 只写 store，submit() 走的是编辑器的仲裁通道；实测 setDraft 之后
+    // 直接 submit() 会静默不动（草稿原样留在框里）。真按一下回车才会进仲裁，
+    // 所以这里把回车事件派发给编辑器，跟人手敲一样。
+    const pressEnter = () => {
+      const ed = document.querySelector('[contenteditable="true"]')
+      if (!ed) return false
+      ed.focus()
+      const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }
+      ed.dispatchEvent(new KeyboardEvent('keydown', opts))
+      ed.dispatchEvent(new KeyboardEvent('keyup', opts))
+      return true
+    }
+    setTimeout(() => {
+      pressEnter()
+      // 命令菜单会先吃掉第一次回车（选中的是 /weld 这一项），补一次真提交。
+      setTimeout(() => {
+        pressEnter()
+        setWeldNote(
+        `已提交：${selected.length} 个会话 · 每个取最近 ${turns} 轮。等侧栏出现「未命名」再点开。` +
+          `（实验功能：宿主对拼接出来的日志校验很挑，新会话有一定概率打不开）`,
+      )
+      }, 700)
+    }, 120)
     // 焊接是后端命令，写完文件后侧栏不会自己重拉；这里补一次刷新，省掉手动刷页面。
     setTimeout(() => {
       try {
@@ -1290,11 +1339,11 @@ function UnionView(props) {
           title:
             selected.length < 2
               ? '至少要选两个会话'
-              : '把这些会话的历史装进一个新会话，原会话一个字不改',
+              : '把这些会话的历史装进一个新会话，原会话一个字不改（实验：宿主对拼接出来的日志校验很挑，可能打不开）',
           style: selected.length >= 2 ? S.btnWeld : S.btnWeldOff,
           onClick: weldNow,
         },
-        '合并为新会话',
+        '合并为新会话（实验）',
       ),
     ),
     weldNote ? h('div', { style: S.tiny }, weldNote) : null,

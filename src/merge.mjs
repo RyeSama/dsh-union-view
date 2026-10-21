@@ -25,6 +25,10 @@ const TURN_CARRYING = new Set([
   'assistant/attempt', 'tool/call', 'tool/result',
 ])
 
+// 会话开头的三条初始化事件，宿主校验要求第一个 turn/start 跟在它们后面。
+// 合并时只保留一组，见 mergeEventStreams 里 sawInit 的用法。
+export const INIT_TYPES = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
+
 /**
  * 每源只保留最近 k 个完整轮次（从 turn/start 起算），外加最开始那条 system/message。
  * 全量合并一个几千条消息的会话，光第一次请求就会把窗口撑爆——截断不是优化，是前提。
@@ -32,11 +36,18 @@ const TURN_CARRYING = new Set([
 export function tailByTurns(events, k) {
   if (!k || k <= 0) return events
   const starts = []
-  events.forEach((e, i) => { if (e.type === 'turn/start') starts.push(i) })
+  const ends = []
+  events.forEach((e, i) => {
+    if (e.type === 'turn/start') starts.push(i)
+    if (e.type === 'turn/end') ends.push(i)
+  })
   if (starts.length <= k) return events
   const from = starts[starts.length - k]
+  // 必须停在一个完整的 turn/end 上：源会话可能正跑到一半，末尾那轮没有收尾事件，
+  // 直接切到流末尾会让下一段源的 turn/start 紧跟在 assistant/message 后面。
+  const lastEnd = ends.length > 0 ? ends[ends.length - 1] : events.length - 1
   const head = events.find((e) => e.type === 'system/message')
-  const tail = events.slice(from)
+  const tail = events.slice(from, lastEnd + 1)
   if (head && !tail.includes(head)) return [head, ...tail]
   return tail
 }
@@ -53,9 +64,18 @@ export function mergeEventStreams(sources) {
   // 渲染出的系统提示是 surface node 0，多份叠在一起会让 replay 在「清空 / 改写 head」之间打转。
   const flat = []
   let sawSystem = false
+  const sawInit = new Set()
   for (const { header, events } of sources) {
     for (const ev of events) {
       if (DROP_TYPES.has(ev.type)) continue
+      // 会话开头的三条初始化事件（permission/preset、sandbox/mode、approval/policy）
+      // 宿主是认的：第一个 turn/start 必须跟在它们后面。合并时只保留第一条源里的
+      // 这一组，后面每个源重复出现的丢掉——否则第二个源的 turn/start 会被顶到
+      // 不属于它的位置，校验报 "turn/start does not open the expected turn"。
+      if (INIT_TYPES.has(ev.type)) {
+        if (sawInit.has(ev.type)) continue
+        sawInit.add(ev.type)
+      }
       if (ev.type === 'system/message') {
         if (sawSystem) continue
         sawSystem = true
@@ -101,25 +121,24 @@ export function mergeEventStreams(sources) {
     if (cur === undefined || t < cur) turnMin.set(srcId, t)
   }
 
-  // 第一遍：按源分段重排 turn。
+  // 第一遍：按 turn/start 出现的顺序发号。
+  // 不能拿「原 turn 号做数学偏移」：源会话里的 turn 号本身可能跳号（被压缩、
+  // 被裁掉过），偏移之后依旧不连续，宿主校验 `turn/start does not open the
+  // expected turn` 就整份拒收。改成顺序发号，保证新日志里 turn 严格 1,2,3… 连续。
+  const turnMap = new Map() // `${srcId}#${oldTurn}` -> newTurn
   const rewritten = []
-  let turnBase = 0
-  let prevSrcId = null
-  let srcTurnMax = 0
+  let nextTurn = 1
 
   for (let i = 0; i < flat.length; i += 1) {
     const { ev, srcId } = flat[i]
-    if (srcId !== prevSrcId) {
-      // 切到下一段：把这一段的轮次整体抬到上一段末尾之后，避免撞号。
-      if (prevSrcId !== null) turnBase += srcTurnMax
-      prevSrcId = srcId
-      srcTurnMax = 0
-    }
     const next = { ...ev }
     if (TURN_CARRYING.has(ev.type) && ev.data && typeof ev.data.turn === 'number') {
-      const shifted = ev.data.turn - (turnMin.get(srcId) || 0) + 1 + turnBase
-      if (shifted > srcTurnMax) srcTurnMax = shifted
-      next.data = { ...ev.data, turn: shifted }
+      if (ev.type === 'turn/start') {
+        turnMap.set(`${srcId}#${ev.data.turn}`, nextTurn)
+        nextTurn += 1
+      }
+      const mapped = turnMap.get(`${srcId}#${ev.data.turn}`)
+      if (mapped !== undefined) next.data = { ...ev.data, turn: mapped }
     }
     rewritten.push({ next, origin: ev })
   }
@@ -140,7 +159,17 @@ export function mergeEventStreams(sources) {
       next.surfaceOp = 'append'
     }
     if (Array.isArray(origin.sourceEventSeqs)) {
-      const mapped = origin.sourceEventSeqs.map((s) => seqNumMap.get(s)).filter((v) => typeof v === 'number')
+      // 宿主校验：sourceEventSeqs 里不能有重复值，也不能引用自己或后面的行
+      // （实测 "sourceEventSeqs ranges must contain unique earlier seqs"）。
+      // 重映射后去重，只留 < 当前位置的。
+      const seen = new Set()
+      const mapped = []
+      for (const s of origin.sourceEventSeqs) {
+        const v = seqNumMap.get(s)
+        if (typeof v !== 'number' || v >= i || seen.has(v)) continue
+        seen.add(v)
+        mapped.push(v)
+      }
       if (mapped.length > 0) next.sourceEventSeqs = mapped
       else delete next.sourceEventSeqs
     }
