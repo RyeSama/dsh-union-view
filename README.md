@@ -1,126 +1,191 @@
-# dsh-union-view
+# 联合视图（dsh-union-view）
 
-DSH Web GUI 的**联合视图**：同时勾选多个会话，把它们的转录拼成一条只读的联合时间线。
+> 把好几个对话并排摊在屏幕上一起看；需要的话，还能把它们的历史焊成一个新对话接着聊。
 
-会话多了以后，问题不是"找不到会话"，而是"同一件事散在三个会话里"——需求在 A 里定、实现在 B 里试、结论在 C 里。
-联合视图把这些会话放进同一块画布，原样并排，不合并、不改写、不注入。
+## 先说这东西解决什么
+
+假设你最近在干一件事，但聊得很散：
+
+- 上周定需求，在 **A** 对话里
+- 中间反复试错，在 **B** 对话里
+- 最后结论和踩过的坑，记在 **C** 对话里
+
+现在你想回顾整件事。怎么办？点开 A 翻一遍，退出来，点开 B 翻一遍，退出来，点开 C 翻一遍。翻到 C 的时候，A 里说的什么已经忘了一半。
+
+**联合视图就是为这个做的**：勾上 A、B、C，三份对话同时摊在同一个屏幕上，左右对照着看。
 
 ```
-┌ 对话  GAL视窗  [联合视图]  轨迹 ┐
-│ 联合视图  2 个会话 · 1449 条消息 · 只读   [时间线][分栏][轮次对齐] [系统事件][刷新][选择会话][清空] │
-│ ── 长上下文自动总结优化 ──┬── 数控雕刻文件任务指导 ── │
-│ AI 23:44:00             │ AI 15:34:21             │
-│ 确认：`SessionBinding` …│ [调用 read_image …]     │
-└─────────────────────────┴─────────────────────────┘
+┌ 对话   GAL视窗   [联合视图]   轨迹 ┐
+│ 联合视图  3 个会话 · 1500 条消息 · 只读                    │
+│ ─── 定需求 ───┬─── 试错 ───┬─── 结论 ─── │
+│ 你 14:02      │ AI 15:31   │ AI 23:44    │
+│ 我想做…       │ 报错了：…  │ 所以最终…   │
+└───────────────┴────────────┴─────────────┘
 ```
 
-## 三种布局
+## 三种摆法
 
-| 布局 | 用途 |
+浏览器里点一下就能换，随时切：
+
+| 摆法 | 什么时候用 |
 | --- | --- |
-| **时间线** | 所有会话的消息按时间交错排，看"当时到底先后发生了什么" |
-| **分栏** | 每个会话一列，各自独立滚动，看"同一时刻两边各在做什么" |
-| **轮次对齐** | 左侧是轮次序号，第 N 轮各会话的内容并排，看"同一个问题两边分别怎么答" |
+| **时间线** | 想知道"当时到底先发生什么、后发生什么" |
+| **分栏** | 想知道"同一时间，两边各自在干嘛" |
+| **轮次对齐** | 想知道"同一个问题，两边分别怎么回答的" |
 
 ![时间线](docs/screenshots/timeline.png)
 ![分栏](docs/screenshots/columns.png)
 ![轮次对齐](docs/screenshots/turns.png)
 
-## 与相邻方案的边界
+## 最重要的一件事：它只是"看"
 
-| 已有能力 | 它做了什么 | 本插件不做的事 |
+用联合视图的时候，它**只读不写**：
+
+- 原对话里一个字都不会被改
+- 不会把几份对话合并、搬来搬去
+- **AI 完全不知道你在这么看** —— 就像你把三份打印稿摊在桌上比对，桌上那台电脑（AI）并不知道
+
+所以它很安全，随便试：看完关掉，世界和之前一模一样。
+
+消息太多时它也不会卡死——每个视角只摆最近一段，上面会提示"更早的 N 条已折叠"。
+
+## 如果你想让 AI 真的看见：`/weld`
+
+上面说了，联合视图 AI 是看不见的。要让它真的看见，用 **`/weld`**：
+
+```
+/weld 3f2a1b 9c8d7e --turns 20
+```
+
+（`3f2a1b`、`9c8d7e` 是两个对话的编号前缀，`--turns 20` 表示每个对话只取最近 20 轮）
+
+它会真的**造出一个新对话**，把这两个对话的历史装进去。这个新对话：
+
+- 出现在你的对话列表里，点开就能看
+- **可以接着聊** —— 这时候 AI 是真的看得见这些历史了
+- 原对话一个字没改（只是被读了一遍）
+
+打个比方：
+
+| | 联合视图 | `/weld` |
 | --- | --- | --- |
-| `@` 引用会话（`dsh-session-reference`） | 把另一个会话的快照**注入当前轮**的模型上下文 | 不注入。联合视图不进模型上下文，模型看不见 |
-| `dsh-belief-merge` | 读取其它会话的模型面，合并后**每轮注入** | 不合并、不评分、不检测矛盾 |
-| `dsh-maze` | 多会话**对比**（差异视图） | 不做 diff，不做评分 |
-| 侧边栏 | 一次显示**一个**会话 | 不改会话归属，不新建会话实体 |
+| 类比 | 把几份文件摊在桌上，自己比对 | 把几份文件装订成一本新的，递给 AI |
+| AI 看得见吗 | 看不见 | 看得见 |
+| 会多出一个对话吗 | 不会 | 会 |
+| 原对话会变吗 | 不会 | 不会 |
 
-一句话：**联合视图是视图，`/weld` 是数据操作**。前者没有新会话、没有合并产物、没有不可逆写入，随时关掉原会话一字未改；后者会真的生成一个新会话文件（源会话仍只读）。
+**为什么一定要 `--turns`**：两个几百条消息的对话，加起来一万多条，AI 一次吃不下。所以必须截断，只取最近若干轮。
 
-联合视图本身不碰 prefix cache：billion-context 的压缩块谱系、`mNNNNN` 引用编号、会话日志都不参与，读的是客户端已经加载的 `ChatSnapshot`。`/weld` 生成的是**新**会话，新会话的第一轮就是全新前缀，与原会话的缓存无关。
+新对话的标题会显示「未命名」，因为原来的标题带引用关系，截断后对不上，干脆不要了。改个名字就行。
 
-## 焊接成新会话：`/weld`
+### 怎么知道对话的编号
 
-联合视图是只读的，模型看不见它。如果你需要**让模型真的同时看到几个会话的历史**，用 `/weld` 把它们焊成一个真实的新会话。
-
-```
-/weld <会话id前缀> <会话id前缀> … [--turns N]
-```
-
-- 不给 `--turns` 就是全量焊接；给了就每个源只取**最近 N 轮**（长会话全量焊接会直接顶到窗口上限，实测两个几百条的会话合起来 1.1 万条事件，必须截断）
-- 新会话会出现在侧栏，有独立 id、独立文件，**可以继续对话**——模型看到的是真实历史，不是注入
-- 只读源会话：只读取、只合并到新文件，源会话一个字节都不改
-- 自动剥掉 reasoning 块（思考过程不进新会话）
-
-新会话标题显示「未命名」，因为 `session/title` 事件带 `messageSeqs` 引用，合并后指向已被裁掉的消息会让日志校验失败，所以直接丢弃。改个名即可。
-
-### 为什么不能手写会话文件
-
-自己往 `~/.dsh/sessions/<project>/session-<uuid>/` 里写一个格式正确的 `session.v4.jsonl.zstd`，侧栏里**不会出现**。两条硬约束：
-
-1. **文件格式**：header 必须独占第一个 zstd frame 且以单个 `\n` 结尾，之后每条事件各自成一个 frame。全部塞进一个 frame 会被 `assertZstdHeaderFrame` 判成 `corrupt Zstandard session log`，而 `listArtifacts` 会**静默跳过**这类文件——不报错，就是没有。
-2. **所有权账本**：侧栏不是扫目录得来的，是读 `~/.dsh/storages/workspace.json` 里 `tables.workspaces[<id>].sessionIds`。没进这个数组的会话文件，格式再对也不显示。
-
-`/weld` 的绕法是自己写文件 + 调 `workspaceRegistry` 的 `attachSession(newId)`：它会先用 `host.readSessionHeader` 校验 header 里的 `cwd`（realpath 归一后）等于工作区路径，通过了才把 id 前插进 `sessionIds`。直接改 `workspace.json` 也能生效，但**只能用 Node 的 `JSON.parse`/`stringify` 改**——用正则删数组元素会留下孤立逗号，JSON 一坏，整个 GUI 变成「暂无会话」。
+在 `.dsh/sessions/` 目录下，每个对话是一个以 `session-` 开头的文件夹，文件夹名就是编号。或者直接看 `~/.dsh/storages/workspace.json`。
 
 ## 安装
+
+用插件管理器：
 
 ```bash
 dsh plugin install dsh-union-view
 ```
 
-装完重启 DSH Web（刷新页面即可，客户端 bundle 会被自动发现）。
+装完重启 DSH Web（或刷新页面），对话页面的标签栏会多出一个「联合视图」。
 
-### 本地开发安装
+### 从源码装
 
-`pnpm` 不可用或想直接跑源码：
+`pnpm` 用不了的时候走这条路：
 
 ```bash
-node scripts/build-client.mjs     # 打包客户端到 .dsh-plugin/client.js
-node scripts/install-local.mjs    # 复制到 ~/.dsh/plugins/dsh-union-view + junction + 写 profile
+node scripts/build-client.mjs     # 把界面代码打包成 .dsh-plugin/client.js
+node scripts/install-local.mjs    # 装进 DSH
 ```
 
-`install-local.mjs` 做三件事：复制仓库到 `~/.dsh/plugins/dsh-union-view`（排除 `node_modules`/`.git`）、
-在 web profile 的 `node_modules` 下建**目录联接**（不需要管理员权限）、把包名追加进 `dsh.profile.bundles`
-（`package.json` 先备份成 `package.json.bak-unionview-<时间戳>`）。脚本幂等，可反复跑。
+第二行脚本做三件事：把整个项目复制到 `~/.dsh/plugins/dsh-union-view`、在 DSH 的 `node_modules` 里建一个目录联接（不需要管理员权限）、把插件名登记进配置。会先备份配置文件，可以反复跑。
 
 ## 用法
 
-1. 打开任意会话，切到「联合视图」标签。
-2. 点「选择会话」，勾选要联合的会话（可多选；勾选状态存在 `localStorage`，下次自动恢复）。
-3. 选布局。三布局随时切换，滚动位置各自维护。
-4. 「系统事件」开关：打开后额外显示 `turn/step` 边界、工具结果等系统节点（默认只显示对话正文）。
-5. 「刷新」重新读一次会话目录（新会话不会自动出现）。
+1. 打开任意对话，点顶部的「联合视图」标签
+2. 点「选择会话」，勾上你想看的对话（可以多选，下次会自动记住）
+3. 换摆法看
+4. 「系统事件」开关：打开后能看到更细的过程（工具调用、轮次边界），平时关着更清爽
 
-## 渲染上限
+## 它不做什么
 
-只读视图也怕一次渲染十万个节点，所以：
+列清楚，免得误会：
 
-- 时间线最多渲染**最近 400 条**消息，上方提示「更早的 N 条已折叠」
-- 分栏每列同样按最近 400 条截断，各自独立
-- 轮次对齐最多渲染**最近 120 轮**，每格最多 3 条正文 + 「还有 N 条」
+- **不能在里面发消息**：它是只读窗口。要接着聊，切回原对话，或者用 `/weld` 造一个新对话
+- **不会自动更新**：新开的对话不会自己冒出来，点一下「刷新」
+- **不显示思考过程**：只显示你和 AI 的正式发言，AI 的推理过程不带
+- **看不到已折叠的历史**：如果某个对话之前被压缩过（上下文太长时 DSH 会折叠旧内容），联合视图看到的也是折叠后的样子
+- **不做对比和评分**：它只是并排显示，不计算差异、不判断谁对谁错
 
-## 实现要点
+## 给想改代码的人
 
-- 注册在 `conversation.view` 槽位（`id: 'union'`，`order: 6`），与 `gal-view` 同构；
-  `dsh.client.inject: ["slots"]` 只保证 bundle 被加载，**运行时还必须在 `src/client.js` 里
-  `export const inject = ['slots', 'sessions', 'uiConversation']`** —— 少写一个，cordis 就不会把服务挂到插件
-  ctx 上，`ctx.sessions` 永远是 `undefined`。
-- 数据源：`ctx.sessions.retain(sessionId, { source: 'unionView' })` → `await ref.ready` →
-  `ctx.uiConversation.binding(ref.binding).target('chat')`，从 `ChatSnapshot.legacy.nodes` 拿节点数组。
-  纯客户端读取，不写任何东西。
-- 只读保证：不调 `activate`、不 `prompt`、不 `fork`、不 `decompress`，只用 `retain` 的引用计数。
-- 铺满会话主体：`data-union-view` 的根节点先 `position: relative`，`useEffect` 往上找到第一个
-  `position !== 'static'` 的祖先（实测是 `.wSkVaW_body`），挂 `data-union-fill` 交给 CSS 绝对定位。
-  **定位必须在 CSS 里写，不能写内联 style**（内联 `position` 会盖掉 CSS 的 `absolute`，面板就会
-  按内容高度涨到 11 万像素）。
+<details>
+<summary>展开技术细节</summary>
+
+### 界面部分怎么挂上去
+
+注册在 DSH 的 `conversation.view` 槽位（`id: 'union'`，`order: 6`），和官方 `gal-view` 是同一个位置。
+
+关键点：`src/client.js` 里必须写
+
+```js
+export const inject = ['slots', 'sessions', 'uiConversation']
+```
+
+少写一个，DSH 就不会把对应服务挂到插件身上，`ctx.sessions` 永远是 `undefined`（插件会显示"宿主未暴露 sessions 服务"）。`package.json` 里的 `dsh.client.inject: ["slots"]` 只负责让界面代码被加载，两回事。
+
+### 数据从哪来
+
+```js
+const ref = ctx.sessions.retain(sessionId, { source: 'unionView' })
+await ref.ready
+const chat = ctx.uiConversation.binding(ref.binding).target('chat')
+const nodes = chat.getSnapshot().legacy.nodes   // 对话节点数组
+```
+
+纯客户端读取，只用 `retain` 的引用计数，不调 `activate`、不 `prompt`、不 `fork`。
+
+### 怎么铺满整个对话区
+
+根节点加 `data-union-view`，`useEffect` 往上找第一个 `position !== 'static'` 的祖先（实测是 `.wSkVaW_body`），给它加上 `data-union-fill`，定位规则写在注入的 CSS 里。
+
+**踩过的坑**：定位一定要写在 CSS 里，不能写内联 `style`——内联的 `position: relative` 会盖掉 CSS 里的 `absolute`，面板会按内容高度一路涨到十几万像素。
+
+### `/weld` 为什么要自己写文件
+
+DSH 有个 `ctx.sessions.create()`，但它只准备内存里的会话对象，**不落盘、不进侧栏账本**（源码注释写得很直白：persistence is a plugin concern）。所以 `/weld` 只能自己造文件：
+
+1. **文件格式**：header 必须独占第一个 zstd frame 且以单个 `\n` 结尾，之后每条事件各自成一个 frame。全塞进一个 frame 会被判 corrupt，而扫描目录的代码对这类文件是**静默跳过**的——不报错，就是看不到。
+2. **侧栏账本**：对话列表不是扫目录得来的，是读 `~/.dsh/storages/workspace.json` 里的 `sessionIds` 数组。不在数组里，文件再正确也不显示。
+
+所以流程是：自己写文件 → 调 `workspaceRegistry.attachSession(newId)` → 它会校验 header 里的 `cwd` 和真实路径一致，通过后才把编号插进数组。
+
+**改 `workspace.json` 只能用 JSON 解析器改**。用正则删数组元素会留下孤立逗号，JSON 一坏，整个界面会变成"暂无会话"。
+
+</details>
+
+## 目录结构
+
+```
+src/client.js       界面（联合会话视图，~1300 行）
+src/merge.mjs       合并逻辑（纯函数，不碰磁盘）
+.dsh-plugin/index.mjs   Node 半边（注册 /weld 命令）
+scripts/build-client.mjs   打包界面代码
+scripts/install-local.mjs  本机安装
+scripts/merge-sessions.mjs 命令行合并（调试用）
+scripts/cleanup-test.mjs   清理测试会话
+scripts/e2e-verify.mjs     自动验收（需要浏览器调试端口）
+```
 
 ## 已知限制
 
-- 只读：不能在联合视图里发消息。想继续问，切回原会话。
-- 消息正文按纯文本渲染（保留 `**`、反引号原样），不做 markdown 排版 —— 这是有意的，转录要保真。
-- 不感知 billion-context 的压缩块：如果某个会话已经折叠过历史，联合视图看到的是折叠后的可见节点。
-- 未做跨会话搜索/过滤；未做导出。
+- 只读视图最多渲染最近 400 条消息（分栏每列独立计算）；轮次对齐最多 120 轮
+- 消息正文按纯文本显示，保留 `**`、反引号原样——这是有意的，转录要保真
+- 没有跨对话搜索、没有导出
+- `/weld` 生成的新对话，第一批请求的缓存要从零建立（新对话全新前缀，这个省不掉）
 
 ## 许可
 

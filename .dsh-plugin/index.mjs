@@ -8,7 +8,7 @@
 // 所以这里自己干两件事：按宿主物理格式分帧写日志，再 attachSession 进账本。
 //
 // 合并规则在 ../src/merge.mjs，和离线脚本 scripts/merge-sessions.mjs 共用同一份。
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { zstdCompressSync, zstdDecompressSync } from 'node:zlib'
@@ -69,8 +69,53 @@ function projectDirFor(cwd) {
   return join(SESSIONS_ROOT, key)
 }
 
-function parseArgs(raw) {
-  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean)
+/** 从事件里挖出可读文字，用于列表预览。结构在不同事件上不统一，逐层兜。 */
+function eventText(ev) {
+  const c = ev?.data?.message?.content ?? ev?.data?.content ?? ev?.data
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c.map((b) => (b && typeof b === 'object' && typeof b.text === 'string' ? b.text : '')).join(' ')
+  }
+  return ''
+}
+
+/** 宿主塞进来的样板消息（不是人打的字），列表预览里要跳过。 */
+function isInjected(text) {
+  const t = String(text || '').trim()
+  if (t.length === 0) return true
+  return /^(The approval policy changed|The output token limit|<)/.test(t)
+}
+
+/** /weld 不带参数：列最近用过的会话，让人凭"第一句话"认出编号。 */
+function listSessions() {
+  const all = listSessionDirs()
+  if (all.length === 0) return `没有找到任何会话日志（${SESSIONS_ROOT}）`
+  const rows = []
+  for (const s of all) {
+    try {
+      const st = statSync(join(s.dir, LOG_NAME))
+      const log = readLog(s.dir)
+      // 首条 user/message 常是宿主注入的样板（审批策略变更、XML 包裹的附件），跳过它们才看得懂
+      const firstUser = log.events.find((e) => e.type === 'user/message' && !isInjected(eventText(e)))
+      const snippet = String(eventText(firstUser) || '').replace(/\s+/g, ' ').trim().slice(0, 42)
+      rows.push({ id: s.id, last: st.mtimeMs, snippet })
+    } catch {
+      // 单个会话读不动就跳过，列表不该因为一个坏文件整体失败
+    }
+  }
+  rows.sort((a, b) => b.last - a.last)
+  const lines = rows.slice(0, 12).map((r) => {
+    const t = new Date(r.last).toLocaleString('zh-CN', {
+      hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    })
+    return `${r.id.slice(8, 16)}  ${t}  ${r.snippet || '（没有文字消息）'}`
+  })
+  return `最近用过的会话（共 ${rows.length} 个）\n\n`
+    + lines.join('\n')
+    + '\n\n把左边那 8 个字符填进去：/weld 编号1 编号2 --turns 20'
+}
+
+function parseArgs(raw) {  const tokens = String(raw || '').trim().split(/\s+/).filter(Boolean)
   let turns = 0
   const wanted = []
   for (let i = 0; i < tokens.length; i += 1) {
@@ -86,8 +131,9 @@ function parseArgs(raw) {
 
 async function weld(ctx, raw) {
   const { turns, wanted } = parseArgs(raw)
+  if (wanted.length === 0) return { kind: 'success', text: listSessions() }
   if (wanted.length < 2) {
-    return { kind: 'error', text: '用法：/weld <会话id或前缀> <会话id或前缀> [...] [--turns N]' }
+    return { kind: 'error', text: '用法：/weld <编号> <编号> [...] [--turns N]\n只看不写：/weld（不带参数）会列出最近用过的会话。' }
   }
 
   const all = listSessionDirs()
@@ -155,6 +201,10 @@ export function apply(ctx) {
       handler: (inv) => weld(ctx, inv.rawInput),
     })
     console.log('[dsh-union-view] /weld 已注册')
+    // 自检：UV_WELD_LIST=1 时打印 /weld 的会话列表，验证列表逻辑而不用手敲命令
+    if (process.env.UV_WELD_LIST) {
+      console.log('[list]\n' + listSessions())
+    }
   } catch (err) {
     console.error('[dsh-union-view] /weld 注册失败:', err && err.stack ? err.stack : err)
   }
